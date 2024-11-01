@@ -45,7 +45,7 @@ pub fn countScalar(comptime T: type, haystack: []const T, needle: T) usize {
 
         if (std.simd.suggestVectorLength(T)) |vec_size| {
             inline for (2..@max(2, @ctz(@as(usize, vec_size)))) |n| {
-                const min_vec: comptime_int = 2 << n;
+                const min_vec = 2 << n;
                 if (haystack.len <= min_vec) {
                     @branchHint(.unlikely);
                     const vec: @Vector(min_vec, T) = @bitCast([_][min_vec / 2]T{
@@ -164,51 +164,64 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     _ = args.next().?;
 
-    const ElemType = u8; // try different types!
-    const buffer_size = try std.fmt.parseInt(usize, args.next() orelse blk: {
-        std.debug.print("Pass a buffer size as the first argument to customize it, defaulting to 10000\n", .{});
-        break :blk "10000";
+    const max_buffer_size = try std.fmt.parseInt(usize, args.next() orelse blk: {
+        std.debug.print("Pass a max buffer size as the first argument to customize it, defaulting to 100_000\n", .{});
+        break :blk "100_000";
     }, 10);
+
     std.debug.print("build mode: {s}\n", .{@tagName(mode)});
-    std.debug.print("buffer size: {d}\n", .{buffer_size});
-    std.debug.print("element type: {s}\n", .{@typeName(ElemType)});
-    std.debug.print("buffer size (bytes): {d}\n", .{buffer_size * @sizeOf(ElemType)});
+    std.debug.print("max buffer size (bytes): {d}\n", .{max_buffer_size});
 
-    const buf = try allocator.alloc(ElemType, buffer_size);
+    inline for (.{ u8, u16, u32, u64 }) |ElemType| {
+        const buf = try allocator.alloc(ElemType, max_buffer_size / @sizeOf(ElemType));
 
-    var rng = std.Random.DefaultPrng.init(0);
+        var rng = std.Random.DefaultPrng.init(0);
 
-    // u8 so the counts arent just zero every time
-    for (buf) |*e| e.* = rng.random().int(u8);
+        // u8 so the counts arent just zero every time
+        for (buf) |*e| e.* = rng.random().int(u8);
 
-    const iters = switch (mode) {
-        .Debug => ((1 << 27) + buffer_size - 1) / buffer_size, // made debug mode actually complete in a reasonable amount of time
-        else => ((1 << 30) + buffer_size - 1) / buffer_size,
-    };
+        const iters = 1024;
+        var buffer_size: usize = 1;
 
-    const values: []ElemType = try allocator.alloc(ElemType, iters);
-    for (values) |*e| e.* = rng.random().int(u8);
+        var out_file = try std.fs.cwd().createFile(@typeName(ElemType) ++ ".csv", .{});
+        defer out_file.close();
+        const output = out_file.writer();
+        try output.print("size,current,naive,protty\n", .{});
+        const values: []ElemType = try allocator.alloc(ElemType, iters);
+        while (buffer_size * @sizeOf(ElemType) <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
+            for (values) |*e| e.* = rng.random().int(u8);
 
-    for (buf) |*e| @prefetch(e, .{});
 
-    var timer = try std.time.Timer.start();
+            var timer = try std.time.Timer.start();
 
-    for (values) |v| std.mem.doNotOptimizeAway(std.mem.count(ElemType, buf, &.{v}));
-    _ = timer.lap();
-    for (values) |v| std.mem.doNotOptimizeAway(std.mem.count(ElemType, buf, &.{v}));
-    const current_stdlib = timer.lap();
+            for (buf[0..buffer_size]) |*e| @prefetch(e, .{});
+            for (values) |v| std.mem.doNotOptimizeAway(std.mem.count(ElemType, buf[0..buffer_size], &.{v}));
+            _ = timer.lap();
+            for (values) |v| std.mem.doNotOptimizeAway(std.mem.count(ElemType, buf[0..buffer_size], &.{v}));
+            const current_stdlib = timer.lap();
 
-    for (values) |v| std.mem.doNotOptimizeAway(countScalarNaive(ElemType, buf, v));
-    _ = timer.lap();
-    for (values) |v| std.mem.doNotOptimizeAway(countScalarNaive(ElemType, buf, v));
-    const naive = timer.lap();
+            for (buf[0..buffer_size]) |*e| @prefetch(e, .{});
+            for (values) |v| std.mem.doNotOptimizeAway(countScalarNaive(ElemType, buf[0..buffer_size], v));
+            _ = timer.lap();
+            for (values) |v| std.mem.doNotOptimizeAway(countScalarNaive(ElemType, buf[0..buffer_size], v));
+            const naive = timer.lap();
 
-    for (values) |v| std.mem.doNotOptimizeAway(countScalar(ElemType, buf, v));
-    _ = timer.lap();
-    for (values) |v| std.mem.doNotOptimizeAway(countScalar(ElemType, buf, v));
-    const protty = timer.lap();
+            for (buf[0..buffer_size]) |*e| @prefetch(e, .{});
+            for (values) |v| std.mem.doNotOptimizeAway(countScalar(ElemType, buf[0..buffer_size], v));
+            _ = timer.lap();
+            for (values) |v| std.mem.doNotOptimizeAway(countScalar(ElemType, buf[0..buffer_size], v));
+            const protty = timer.lap();
 
-    std.debug.print("current std lib: {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(current_stdlib)), std.fmt.fmtDuration(current_stdlib) });
-    std.debug.print("naive:           {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(naive)), std.fmt.fmtDuration(naive) });
-    std.debug.print("protty:          {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(protty)), std.fmt.fmtDuration(protty) });
+            // std.debug.print("current std lib: {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(current_stdlib)), std.fmt.fmtDuration(current_stdlib) });
+            // std.debug.print("naive:           {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(naive)), std.fmt.fmtDuration(naive) });
+            // std.debug.print("protty:          {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(protty)), std.fmt.fmtDuration(protty) });
+
+            try output.print("{},{d},{d},{d}\n", .{
+                buffer_size * @sizeOf(ElemType),
+                @as(f64, @floatFromInt(current_stdlib)) / iters,
+                @as(f64, @floatFromInt(naive)) / iters,
+                @as(f64, @floatFromInt(protty)) / iters,
+            });
+        }
+    }
 }
