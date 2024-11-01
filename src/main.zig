@@ -59,12 +59,25 @@ pub fn countScalar(comptime T: type, haystack: []const T, needle: T) usize {
             var i: usize = 0;
             while (haystack[i..].len > vec_size) {
                 @branchHint(.likely);
-                var acc: @Vector(vec_size, Count) = @splat(0);
-                for (0..@min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize))) |_| {
-                    acc += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
-                    i += vec_size;
+                const num_accumulators = 4;
+                var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
+                const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
+                var iter: usize = 0;
+                while (iter + num_accumulators - 1 < iters) : (iter += num_accumulators) {
+                    for (0..num_accumulators) |acc_idx| {
+                        accs[acc_idx] += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
+                        i += vec_size;
+                    }
                 }
-                found += @reduce(.Add, @as(@Vector(vec_size, usize), @intCast(acc)));
+                for (1..num_accumulators) |acc_idx| {
+                    if (iter < iters) {
+                        accs[0] += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
+                        i += vec_size;
+                        iter += 1;
+                    }
+                    accs[0] += accs[acc_idx];
+                }
+                found += @reduce(.Add, @as(@Vector(vec_size, usize), @intCast(accs[0])));
             }
             found += V.countLast(vec_size, haystack[haystack.len - vec_size ..][0..vec_size].*, needle, haystack.len % vec_size);
             return found;
@@ -190,7 +203,6 @@ pub fn main() !void {
         const values: []ElemType = try allocator.alloc(ElemType, iters);
         while (buffer_size * @sizeOf(ElemType) <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             for (values) |*e| e.* = rng.random().int(u8);
-
 
             var timer = try std.time.Timer.start();
 
