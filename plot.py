@@ -18,8 +18,11 @@ def time_fmt(x, pos):
         return ""
     for x_unit in ["ns", "us", "ms", "s"]:
         if x < 1000:
-            return "%3.0f %s" % (x, x_unit)
+            return "%3.1f %s" % (x, x_unit)
         x /= 1000
+
+def cycle_fmt(x, pos):
+    return "%3.1f" % x
 
 
 def main(name):
@@ -44,7 +47,7 @@ def main(name):
     lo, hi = inf, -inf
     for label in labels[1:]:
         dashes = []
-        smoothed_data = df_to_plot[label].rolling(25).median()
+        smoothed_data = df_to_plot[label].rolling(50).median()
         filter_nan = lambda a: a[~np.isnan(a)]
         lo = min(lo, min(filter_nan(smoothed_data)))
         hi = max(hi, max(filter_nan(smoothed_data)))
@@ -61,14 +64,16 @@ def main(name):
     plt.gca().set_xscale("log")
     plt.gca().xaxis.set_major_formatter(tkr.FuncFormatter(sizeof_fmt))
     plt.gca().yaxis.set_major_locator(
-        tkr.LogLocator(base=10.0, subs="auto", numticks=10)
+        tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=10)
     )
-    plt.gca().yaxis.set_minor_locator(
-        tkr.LogLocator(base=10.0, subs="auto", numticks=100)
-    )
-    plt.gca().grid(True, which="major", linestyle="--", linewidth=1)
+    # plt.gca().yaxis.set_minor_locator(
+    #     tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=10)
+    # )
+    plt.gca().yaxis.set_major_formatter(tkr.FuncFormatter(cycle_fmt))
+    plt.gca().yaxis.set_minor_formatter(tkr.FuncFormatter(lambda *a: ""))
+    plt.gca().grid(True, which="both", linestyle="--", linewidth=1)
     plt.xlabel("Size (bytes)")
-    plt.ylabel("Nanoseconds")
+    plt.ylabel("Cycles")
 
     plt.title(f"countScalar ({name})")
 

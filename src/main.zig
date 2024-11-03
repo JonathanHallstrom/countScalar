@@ -59,7 +59,7 @@ pub fn countScalar(comptime T: type, haystack: []const T, needle: T) usize {
             var i: usize = 0;
             while (haystack[i..].len > vec_size) {
                 @branchHint(.likely);
-                const num_accumulators = 4;
+                const num_accumulators = 1;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
                 const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
                 var iter: usize = 0;
@@ -142,6 +142,16 @@ fn fuzzOne(bytes: []const u8) !void {
                 countScalar(T, haystack, needle),
             ) catch |e| {
                 std.debug.print("{d} {any} {}\n", .{ needle, haystack, len });
+                const new_outp = try std.heap.page_allocator.dupe(T, haystack);
+                defer std.heap.page_allocator.free(new_outp);
+                for (new_outp) |*elem| {
+                    if (elem.* == needle) {
+                        elem.* = 1;
+                    } else {
+                        elem.* = 0;
+                    }
+                }
+                std.debug.print("{d} {any} {}\n", .{ 1, new_outp, len });
                 return e;
             };
         }
@@ -161,16 +171,92 @@ pub fn sched_setaffinity(pid: std.os.linux.pid_t, set: *const std.os.linux.cpu_s
         else => |err| return std.posix.unexpectedErrno(err),
     }
 }
+
+inline fn flushFromCache(comptime T: type, slice: []const T) void {
+    for (0..slice.len / @sizeOf(T)) |chunk| {
+        const offset = slice.ptr + (chunk * @sizeOf(T));
+        asm volatile ("clflush %[ptr]"
+            :
+            : [ptr] "m" (offset),
+            : "memory"
+        );
+    }
+}
+
+inline fn rdtsc() u64 {
+    var a: u32 = undefined;
+    var b: u32 = undefined;
+    asm volatile ("rdtscp"
+        : [a] "={edx}" (a),
+          [b] "={eax}" (b),
+        :
+        : "ecx"
+    );
+    return (@as(u64, a) << 32) | b;
+}
+
+fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: anytype, flush_args: anytype) f64 {
+    const invoke_n = struct {
+        fn impl(n: usize, args_: anytype, flush_args_: anytype) usize {
+            _ = @call(.auto, flush_func, flush_args_);
+            const start = rdtsc();
+            for (0..n) |_| {
+                std.mem.doNotOptimizeAway(@call(.never_inline, func, args_));
+            }
+            const end = rdtsc();
+            return end - start;
+        }
+    }.impl;
+
+    const max_samples = 1 << 14;
+
+    // minimum number of cycles we want each invocation to take
+    // 640Ki should be enough for anyone
+    const cycle_per_run_thresh = 640 << 10;
+    const total_cycle_thresh = cycle_per_run_thresh << 10;
+
+    var sum: u64 = invoke_n(1, args, flush_args);
+    var run_iters: u64 = 1;
+    while (sum < cycle_per_run_thresh) {
+        run_iters *= 2;
+        sum = invoke_n(run_iters, args, flush_args);
+    }
+    // one invocation is enough
+    if (sum >= total_cycle_thresh) {
+        return @floatFromInt(sum);
+    }
+
+    var buf: [max_samples]u64 = undefined;
+    var num_samples: usize = 1;
+    buf[0] = sum;
+    var sum_sqr: u64 = sum * sum;
+    var avg = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(num_samples));
+    var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum))) / @as(f64, @floatFromInt(num_samples)) + avg * avg;
+    var cv = (1 + 1 / @as(f64, @floatFromInt(4 * num_samples))) * std_dev / avg;
+    while (cv > 0.01 and num_samples < max_samples) {
+        const sample = invoke_n(run_iters, args, flush_args);
+        sum += sample;
+        sum_sqr += sample * sample;
+        num_samples += 1;
+
+        avg = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(num_samples));
+        std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum))) / @as(f64, @floatFromInt(num_samples)) + avg * avg;
+        cv = (1 + 1 / @as(f64, @floatFromInt(4 * num_samples))) * std_dev / avg;
+    }
+
+    return avg / @as(f64, @floatFromInt(run_iters));
+}
+
 pub fn main() !void {
-    if (@import("builtin").os.tag == .linux) {
+    if (builtin.os.tag == .linux) {
         const cpu0001: std.os.linux.cpu_set_t = [1]usize{0b0001} ++ ([_]usize{0} ** (16 - 1));
         try sched_setaffinity(0, &cpu0001);
     }
-    const mode = @import("builtin").mode;
+    const mode = builtin.mode;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(if (builtin.link_libc) std.heap.raw_c_allocator else gpa.allocator());
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -193,46 +279,33 @@ pub fn main() !void {
         // u8 so the counts arent just zero every time
         for (buf) |*e| e.* = rng.random().int(u8);
 
-        const iters = 1024;
+        const num_values_to_test_correctness = 1024;
         var buffer_size: usize = 1;
 
         var out_file = try std.fs.cwd().createFile(@typeName(ElemType) ++ ".csv", .{});
         defer out_file.close();
         const output = out_file.writer();
         try output.print("size,current,naive,protty\n", .{});
-        const values: []ElemType = try allocator.alloc(ElemType, iters);
+        const values: []ElemType = try allocator.alloc(ElemType, num_values_to_test_correctness);
         while (buffer_size * @sizeOf(ElemType) <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             for (values) |*e| e.* = rng.random().int(u8);
 
-            var timer = try std.time.Timer.start();
+            const value_to_look_for = rng.random().int(u8);
+            const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const protty = measureCycles(countScalar, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
 
-            for (buf[0..buffer_size]) |*e| @prefetch(e, .{});
-            for (values) |v| std.mem.doNotOptimizeAway(std.mem.count(ElemType, buf[0..buffer_size], &.{v}));
-            _ = timer.lap();
-            for (values) |v| std.mem.doNotOptimizeAway(std.mem.count(ElemType, buf[0..buffer_size], &.{v}));
-            const current_stdlib = timer.lap();
-
-            for (buf[0..buffer_size]) |*e| @prefetch(e, .{});
-            for (values) |v| std.mem.doNotOptimizeAway(countScalarNaive(ElemType, buf[0..buffer_size], v));
-            _ = timer.lap();
-            for (values) |v| std.mem.doNotOptimizeAway(countScalarNaive(ElemType, buf[0..buffer_size], v));
-            const naive = timer.lap();
-
-            for (buf[0..buffer_size]) |*e| @prefetch(e, .{});
-            for (values) |v| std.mem.doNotOptimizeAway(countScalar(ElemType, buf[0..buffer_size], v));
-            _ = timer.lap();
-            for (values) |v| std.mem.doNotOptimizeAway(countScalar(ElemType, buf[0..buffer_size], v));
-            const protty = timer.lap();
-
-            // std.debug.print("current std lib: {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(current_stdlib)), std.fmt.fmtDuration(current_stdlib) });
-            // std.debug.print("naive:           {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(naive)), std.fmt.fmtDuration(naive) });
-            // std.debug.print("protty:          {d:>6.2}GB/s (runtime: {d:>9})\n", .{ @as(f64, @floatFromInt(buffer_size * iters)) / @as(f64, @floatFromInt(protty)), std.fmt.fmtDuration(protty) });
+            for (values) |v| {
+                const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], v);
+                const protty_cnt = countScalar(ElemType, buf[0..buffer_size], v);
+                try std.testing.expectEqual(naive_cnt, protty_cnt);
+            }
 
             try output.print("{},{d},{d},{d}\n", .{
                 buffer_size * @sizeOf(ElemType),
-                @as(f64, @floatFromInt(current_stdlib)) / iters,
-                @as(f64, @floatFromInt(naive)) / iters,
-                @as(f64, @floatFromInt(protty)) / iters,
+                current_stdlib,
+                naive,
+                protty,
             });
         }
     }
