@@ -143,7 +143,7 @@ pub fn countScalarMultiAccum(comptime T: type, haystack: []const T, needle: T) u
 
             var i: usize = 0;
             while (haystack[i..].len > vec_size) {
-                @branchHint(.likely);
+                @branchHint(.unlikely);
                 const num_accumulators = 4;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
                 const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
@@ -227,7 +227,7 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
 
             var i: usize = 0;
             while (haystack[i..].len > vec_size) {
-                @branchHint(.likely);
+                @branchHint(.unlikely);
                 const num_accumulators = 4;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
                 const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
@@ -244,10 +244,10 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
                 }) {
                     @branchHint(.unlikely);
                     assert(vecs_per_page % 2 == 0);
-                    for (0..vecs_per_page / 2) |half_vec_idx| {
+                    inline for (0..vecs_per_page / 2) |half_vec_idx| {
                         const vec_idx = half_vec_idx * 2;
-                        for (0..num_accumulators) |acc_idx| {
-                            @prefetch(haystack[i + vec_idx * vec_size + acc_idx * page_size ..].ptr + 4 * cache_line_size, .{ .locality = 0 });
+                        inline for (0..num_accumulators) |acc_idx| {
+                            @prefetch(haystack[i + vec_idx * vec_size + acc_idx * page_size ..].ptr + 2 * cache_line_size, .{ .locality = 0 });
                             accs[acc_idx] += V.count(vec_size, haystack[i + vec_idx * vec_size + acc_idx * page_size ..][0..vec_size].*, needle);
                             accs[acc_idx] += V.count(vec_size, haystack[i + (vec_idx + 1) * vec_size + acc_idx * page_size ..][0..vec_size].*, needle);
                         }
@@ -255,8 +255,7 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
                 }
 
                 while (iter + num_accumulators - 1 < iters) : (iter += num_accumulators) {
-                    @branchHint(.unlikely);
-                    for (0..num_accumulators) |acc_idx| {
+                    inline for (0..num_accumulators) |acc_idx| {
                         accs[acc_idx] += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
                         i += vec_size;
                     }
@@ -401,35 +400,51 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
     // minimum number of cycles we want each invocation to take
     // 640Ki should be enough for anyone
     const cycle_per_run_thresh = 640 << 10;
-    const total_cycle_thresh = cycle_per_run_thresh << 10;
+    const total_cycle_min_thresh = cycle_per_run_thresh << 2;
+    const total_cycle_max_thresh = cycle_per_run_thresh << 10;
 
-    var sum: u64 = invoke_n(1, args, flush_args);
+    var sum_cycles: u64 = invoke_n(1, args, flush_args);
     var run_iters: u64 = 1;
-    while (sum < cycle_per_run_thresh) {
+    while (sum_cycles < cycle_per_run_thresh) {
         run_iters *= 2;
-        sum = invoke_n(run_iters, args, flush_args);
+        sum_cycles = invoke_n(run_iters, args, flush_args);
     }
     // one invocation is enough
-    if (sum >= total_cycle_thresh) {
-        return @floatFromInt(sum);
+    if (sum_cycles >= total_cycle_max_thresh) {
+        return @floatFromInt(sum_cycles);
     }
 
     var buf: [max_samples]u64 = undefined;
-    var num_samples: usize = 1;
-    buf[0] = sum;
-    var sum_sqr: u64 = sum * sum;
-    var avg = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(num_samples));
-    var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum))) / @as(f64, @floatFromInt(num_samples)) + avg * avg;
-    var cv = (1 + 1 / @as(f64, @floatFromInt(4 * num_samples))) * std_dev / avg;
-    while (cv > 0.01 and num_samples < max_samples) {
+    var sample_count: usize = 1;
+    buf[0] = sum_cycles;
+    var sum_sqr: u64 = sum_cycles * sum_cycles;
+    var avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
+    var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg;
+    var cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
+    const cv_thresh = 0.5;
+    while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
         const sample = invoke_n(run_iters, args, flush_args);
-        sum += sample;
+        sum_cycles += sample;
         sum_sqr += sample * sample;
-        num_samples += 1;
+        sample_count += 1;
 
-        avg = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(num_samples));
-        std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum))) / @as(f64, @floatFromInt(num_samples)) + avg * avg;
-        cv = (1 + 1 / @as(f64, @floatFromInt(4 * num_samples))) * std_dev / avg;
+        if (sample_count > 16 and cv > cv_thresh) {
+            var new_sample_count: usize = 0;
+            for (buf[0..sample_count]) |s| {
+                const fs: f64 = @floatFromInt(s);
+                if (avg / 2 < fs and fs < avg * 1.5) {
+                    buf[new_sample_count] = s;
+                    new_sample_count += 1;
+                } else {
+                    sum_cycles -= s;
+                    sum_sqr -= s * s;
+                }
+            }
+        }
+
+        avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
+        std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg);
+        cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
     }
 
     return avg / @as(f64, @floatFromInt(run_iters));
@@ -459,7 +474,12 @@ pub fn main() !void {
     std.debug.print("build mode: {s}\n", .{@tagName(mode)});
     std.debug.print("max buffer size (bytes): {d}\n", .{max_buffer_size});
 
-    inline for (.{ u8, u16, u32, u64 }) |ElemType| {
+    inline for (.{
+        // u8,
+        // u16,
+        // u32,
+        u64,
+    }) |ElemType| {
         const buf = try allocator.alloc(ElemType, max_buffer_size / @sizeOf(ElemType));
 
         var rng = std.Random.DefaultPrng.init(0);
