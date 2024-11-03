@@ -360,14 +360,22 @@ pub fn sched_setaffinity(pid: std.os.linux.pid_t, set: *const std.os.linux.cpu_s
 }
 
 inline fn flushFromCache(comptime T: type, slice: []const T) void {
-    for (0..slice.len / @sizeOf(T)) |chunk| {
-        const offset = slice.ptr + (chunk * @sizeOf(T));
+    var offs: usize = 0;
+    while (offs < slice.len) : (offs += std.atomic.cache_line / @sizeOf(T)) {
         asm volatile ("clflush %[ptr]"
             :
-            : [ptr] "m" (offset),
+            : [ptr] "m" (slice[offs..]),
             : "memory"
         );
     }
+    // for (0..slice.len / @sizeOf(T)) |chunk| {
+    //     const offset = slice.ptr + (chunk * @sizeOf(T));
+    //     asm volatile ("clflush %[ptr]"
+    //         :
+    //         : [ptr] "m" (offset),
+    //         : "memory"
+    //     );
+    // }
 }
 
 inline fn rdtsc() u64 {
@@ -414,6 +422,7 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
         return @floatFromInt(sum_cycles);
     }
 
+    const min_sample_count = 2;
     var buf: [max_samples]u64 = undefined;
     var sample_count: usize = 1;
     buf[0] = sum_cycles;
@@ -421,25 +430,22 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
     var avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
     var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg;
     var cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
-    const cv_thresh = 0.5;
-    while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
+    const cv_thresh = 0.1;
+    while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh or sample_count < min_sample_count) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
         const sample = invoke_n(run_iters, args, flush_args);
         sum_cycles += sample;
         sum_sqr += sample * sample;
         sample_count += 1;
 
         if (sample_count > 16 and cv > cv_thresh) {
-            var new_sample_count: usize = 0;
-            for (buf[0..sample_count]) |s| {
-                const fs: f64 = @floatFromInt(s);
-                if (avg / 2 < fs and fs < avg * 1.5) {
-                    buf[new_sample_count] = s;
-                    new_sample_count += 1;
-                } else {
-                    sum_cycles -= s;
-                    sum_sqr -= s * s;
-                }
+            std.sort.pdq(u64, buf[0..sample_count], void{}, std.sort.asc(u64));
+
+            const lo: f64 = @floatFromInt(buf[0]);
+            const hi: f64 = @floatFromInt(buf[sample_count - 1]);
+            if (@abs(lo - avg) > @abs(hi - avg)) {
+                std.mem.copyForwards(u64, buf[0 .. sample_count - 1], buf[1..sample_count]);
             }
+            sample_count -= 1;
         }
 
         avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
@@ -466,21 +472,21 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     _ = args.next().?;
 
-    const max_buffer_size = try std.fmt.parseInt(usize, args.next() orelse blk: {
+    const max_buffer_size_bytes = try std.fmt.parseInt(usize, args.next() orelse blk: {
         std.debug.print("Pass a max buffer size as the first argument to customize it, defaulting to 100_000\n", .{});
         break :blk "100_000";
     }, 10);
 
     std.debug.print("build mode: {s}\n", .{@tagName(mode)});
-    std.debug.print("max buffer size (bytes): {d}\n", .{max_buffer_size});
+    std.debug.print("max buffer size (bytes): {d}\n", .{max_buffer_size_bytes});
 
     inline for (.{
-        // u8,
-        // u16,
-        // u32,
+        u8,
+        u16,
+        u32,
         u64,
     }) |ElemType| {
-        const buf = try allocator.alloc(ElemType, max_buffer_size / @sizeOf(ElemType));
+        const buf = try allocator.alloc(ElemType, max_buffer_size_bytes / @sizeOf(ElemType));
 
         var rng = std.Random.DefaultPrng.init(0);
 
@@ -495,7 +501,8 @@ pub fn main() !void {
         const output = out_file.writer();
         try output.print("size,current,naive,protty,multi,streaming\n", .{});
         const values: []ElemType = try allocator.alloc(ElemType, num_values_to_test_correctness);
-        while (buffer_size * @sizeOf(ElemType) <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
+        const max_buffer_size = max_buffer_size_bytes / @sizeOf(ElemType);
+        while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             for (values) |*e| e.* = rng.random().int(u8);
 
             const value_to_look_for = rng.random().int(u8);
