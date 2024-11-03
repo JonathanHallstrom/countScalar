@@ -236,19 +236,26 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
                 const page_size_bytes = std.mem.page_size;
                 const page_size = page_size_bytes / @sizeOf(T);
                 const vecs_per_page = page_size / vec_size;
+                const cache_line_size = std.atomic.cache_line / @sizeOf(T);
 
                 while (iter + vecs_per_page * num_accumulators - 1 < iters) : ({
                     iter += vecs_per_page * num_accumulators;
                     i += page_size * num_accumulators;
                 }) {
-                    for (0..vecs_per_page) |vec_idx| {
+                    @branchHint(.unlikely);
+                    assert(vecs_per_page % 2 == 0);
+                    for (0..vecs_per_page / 2) |half_vec_idx| {
+                        const vec_idx = half_vec_idx * 2;
                         for (0..num_accumulators) |acc_idx| {
-                            accs[acc_idx] += V.count(vec_size, haystack[i + vec_idx * vec_idx + acc_idx * page_size ..][0..vec_size].*, needle);
+                            @prefetch(haystack[i + vec_idx * vec_size + acc_idx * page_size ..].ptr + 4 * cache_line_size, .{ .locality = 0 });
+                            accs[acc_idx] += V.count(vec_size, haystack[i + vec_idx * vec_size + acc_idx * page_size ..][0..vec_size].*, needle);
+                            accs[acc_idx] += V.count(vec_size, haystack[i + (vec_idx + 1) * vec_size + acc_idx * page_size ..][0..vec_size].*, needle);
                         }
                     }
                 }
 
                 while (iter + num_accumulators - 1 < iters) : (iter += num_accumulators) {
+                    @branchHint(.unlikely);
                     for (0..num_accumulators) |acc_idx| {
                         accs[acc_idx] += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
                         i += vec_size;
@@ -482,7 +489,7 @@ pub fn main() !void {
                 const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], v);
                 const protty_cnt = countScalarProtty(ElemType, buf[0..buffer_size], v);
                 const multi_cnt = countScalarMultiAccum(ElemType, buf[0..buffer_size], v);
-                const streaming_cnt = countScalarMultiAccum(ElemType, buf[0..buffer_size], v);
+                const streaming_cnt = countScalarStreaming(ElemType, buf[0..buffer_size], v);
                 try std.testing.expectEqual(naive_cnt, protty_cnt);
                 try std.testing.expectEqual(naive_cnt, multi_cnt);
                 try std.testing.expectEqual(naive_cnt, streaming_cnt);
