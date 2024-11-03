@@ -8,7 +8,74 @@ const backend_supports_vectors = switch (@import("builtin").zig_backend) {
     else => false,
 };
 
-pub fn countScalar(comptime T: type, haystack: []const T, needle: T) usize {
+pub fn countScalarProtty(comptime T: type, haystack: []const T, needle: T) usize {
+    var found: usize = 0;
+
+    if (haystack.len == 0) return found;
+    if (haystack.len < 4) {
+        @branchHint(.unlikely);
+        found += (haystack.len >> 1) & (haystack.len & 1) & @intFromBool(haystack[haystack.len - 1] == needle);
+        found += (haystack.len >> 1) & @intFromBool(haystack[haystack.len >> 1] == needle);
+        found += @intFromBool(haystack[0] == needle);
+        return found;
+    }
+
+    if (backend_supports_vectors and
+        !std.debug.inValgrind() and // https://github.com/ziglang/zig/issues/17717
+        !@inComptime() and
+        (@typeInfo(T) == .int or @typeInfo(T) == .float) and
+        std.math.isPowerOfTwo(@bitSizeOf(T)) and
+        std.meta.hasUniqueRepresentation(T))
+    {
+        const Count = std.meta.Int(.unsigned, @bitSizeOf(T));
+        const V = struct {
+            fn count(n: comptime_int, vec: @Vector(n, T), scalar: T) @Vector(n, Count) {
+                const value: @Vector(n, T) = @splat(scalar);
+                const ones: @Vector(n, Count) = @splat(1);
+                return @select(Count, vec == value, ones, ones - ones);
+            }
+
+            fn countLast(n: comptime_int, vec: @Vector(n, T), scalar: T, len: usize) usize {
+                const value: @Vector(n, T) = @splat(scalar);
+                var mask: std.meta.Int(.unsigned, n) = @bitCast(vec == value);
+                mask >>= @truncate(n - len);
+                return @popCount(mask);
+            }
+        };
+
+        if (std.simd.suggestVectorLength(T)) |vec_size| {
+            inline for (2..@max(2, @ctz(@as(usize, vec_size)))) |n| {
+                const min_vec: comptime_int = 2 << n;
+                if (haystack.len <= min_vec) {
+                    @branchHint(.unlikely);
+                    const vec: @Vector(min_vec, T) = @bitCast([_][min_vec / 2]T{
+                        haystack[haystack.len - (min_vec / 2) ..][0 .. min_vec / 2].*,
+                        haystack[0 .. min_vec / 2].*,
+                    });
+                    return V.countLast(min_vec, vec, needle, haystack.len);
+                }
+            }
+
+            var i: usize = 0;
+            while (haystack[i..].len > vec_size) {
+                @branchHint(.likely);
+                var acc: @Vector(vec_size, Count) = @splat(0);
+                for (0..@min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize))) |_| {
+                    acc += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
+                    i += vec_size;
+                }
+                found += @reduce(.Add, @as(@Vector(vec_size, usize), @intCast(acc)));
+            }
+            found += V.countLast(vec_size, haystack[haystack.len - vec_size ..][0..vec_size].*, needle, haystack.len % vec_size);
+            return found;
+        }
+    }
+
+    for (haystack) |elem| found += @intFromBool(elem == needle);
+    return found;
+}
+
+pub fn countScalarMultiAccum(comptime T: type, haystack: []const T, needle: T) usize {
     var found: usize = 0;
 
     if (haystack.len == 0) return found;
@@ -59,7 +126,7 @@ pub fn countScalar(comptime T: type, haystack: []const T, needle: T) usize {
             var i: usize = 0;
             while (haystack[i..].len > vec_size) {
                 @branchHint(.likely);
-                const num_accumulators = 1;
+                const num_accumulators = 4;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
                 const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
                 var iter: usize = 0;
@@ -88,7 +155,17 @@ pub fn countScalar(comptime T: type, haystack: []const T, needle: T) usize {
     return found;
 }
 
-test countScalar {
+pub fn countScalarNaive(comptime T: type, haystack: []const T, needle: T) usize {
+    var found: usize = 0;
+
+    for (haystack) |elem| {
+        found += @intFromBool(std.meta.eql(elem, needle));
+    }
+
+    return found;
+}
+
+fn testCountScalar(countScalar: anytype) !void {
     try testing.expectEqual(0, countScalar(u8, &.{0}, 1));
     try testing.expectEqual(1, countScalar(u8, &.{1}, 1));
     try testing.expectEqual(0, countScalar(u8, &.{ 0, 0 }, 1));
@@ -116,16 +193,6 @@ test countScalar {
     try testing.expectEqual(300, countScalar(u128, &(.{ 0, 0, 1, 2, 0, 3 } ** 100), 0));
 }
 
-pub fn countScalarNaive(comptime T: type, haystack: []const T, needle: T) usize {
-    var found: usize = 0;
-
-    for (haystack) |elem| {
-        found += @intFromBool(std.meta.eql(elem, needle));
-    }
-
-    return found;
-}
-
 fn fuzzOne(bytes: []const u8) !void {
     inline for (.{ u8, u16, u24, u32, u64, f32, f64 }) |T| {
         const bytes_discard_for_alignment = (@alignOf(T) - @intFromPtr(bytes.ptr) % @alignOf(T)) % @alignOf(T);
@@ -137,23 +204,25 @@ fn fuzzOne(bytes: []const u8) !void {
             const needle = array[0];
             const haystack = array[1..];
 
-            testing.expectEqual(
-                countScalarNaive(T, haystack, needle),
-                countScalar(T, haystack, needle),
-            ) catch |e| {
-                std.debug.print("{d} {any} {}\n", .{ needle, haystack, len });
-                const new_outp = try std.heap.page_allocator.dupe(T, haystack);
-                defer std.heap.page_allocator.free(new_outp);
-                for (new_outp) |*elem| {
-                    if (elem.* == needle) {
-                        elem.* = 1;
-                    } else {
-                        elem.* = 0;
+            for (.{ "protty", "multi" }, .{ countScalarProtty, countScalarMultiAccum }) |name, countScalar| {
+                testing.expectEqual(
+                    countScalarNaive(T, haystack, needle),
+                    countScalar(T, haystack, needle),
+                ) catch |e| {
+                    std.debug.print("{d} {any} {}\n", .{ needle, haystack, len });
+                    const new_outp = try std.heap.page_allocator.dupe(T, haystack);
+                    defer std.heap.page_allocator.free(new_outp);
+                    for (new_outp) |*elem| {
+                        if (elem.* == needle) {
+                            elem.* = 1;
+                        } else {
+                            elem.* = 0;
+                        }
                     }
-                }
-                std.debug.print("{d} {any} {}\n", .{ 1, new_outp, len });
-                return e;
-            };
+                    std.debug.print("{s} failed on: {d} {any} {}\n", .{ name, 1, new_outp, len });
+                    return e;
+                };
+            }
         }
     }
 }
@@ -285,7 +354,7 @@ pub fn main() !void {
         var out_file = try std.fs.cwd().createFile(@typeName(ElemType) ++ ".csv", .{});
         defer out_file.close();
         const output = out_file.writer();
-        try output.print("size,current,naive,protty\n", .{});
+        try output.print("size,current,naive,protty,multi\n", .{});
         const values: []ElemType = try allocator.alloc(ElemType, num_values_to_test_correctness);
         while (buffer_size * @sizeOf(ElemType) <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             for (values) |*e| e.* = rng.random().int(u8);
@@ -293,19 +362,23 @@ pub fn main() !void {
             const value_to_look_for = rng.random().int(u8);
             const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
             const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const protty = measureCycles(countScalar, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const protty = measureCycles(countScalarProtty, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const multi = measureCycles(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
 
             for (values) |v| {
                 const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], v);
-                const protty_cnt = countScalar(ElemType, buf[0..buffer_size], v);
+                const protty_cnt = countScalarProtty(ElemType, buf[0..buffer_size], v);
+                const multi_cnt = countScalarMultiAccum(ElemType, buf[0..buffer_size], v);
                 try std.testing.expectEqual(naive_cnt, protty_cnt);
+                try std.testing.expectEqual(naive_cnt, multi_cnt);
             }
 
-            try output.print("{},{d},{d},{d}\n", .{
+            try output.print("{},{d},{d},{d},{d}\n", .{
                 buffer_size * @sizeOf(ElemType),
                 current_stdlib,
                 naive,
                 protty,
+                multi,
             });
         }
     }

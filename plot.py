@@ -62,6 +62,9 @@ def main(name):
     plt.gca().set_yscale("log")
 
     plt.gca().set_xscale("log")
+    plt.gca().xaxis.set_major_locator(
+        tkr.LogLocator(base=10.0, subs=range(0, 11, 3), numticks=10)
+    )
     plt.gca().xaxis.set_major_formatter(tkr.FuncFormatter(sizeof_fmt))
     plt.gca().yaxis.set_major_locator(
         tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=10)
