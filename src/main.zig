@@ -390,7 +390,7 @@ inline fn rdtsc() u64 {
     return (@as(u64, a) << 32) | b;
 }
 
-fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: anytype, flush_args: anytype) !f64 {
+fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: anytype, flush_args: anytype) f64 {
     const invoke_n = struct {
         fn impl(n: usize, args_: anytype, flush_args_: anytype) usize {
             _ = @call(.auto, flush_func, flush_args_);
@@ -422,51 +422,19 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
 
     const min_sample_count = 2;
     const max_samples = 1 << 14;
-    var buf: [max_samples * @sizeOf(u64) * 2]u8 = undefined;
-
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const cmp = struct {
-        fn impl(_: void, a: u64, b: u64) std.math.Order {
-            return std.math.order(a, b);
-        }
-    }.impl;
-    var values = std.PriorityDequeue(u64, void, cmp).init(fba.allocator(), void{});
-    try values.ensureTotalCapacity(max_samples);
-    defer values.deinit();
 
     var sample_count: usize = 1;
-    try values.add(sum_cycles);
     var sum_sqr: u64 = sum_cycles * sum_cycles;
     var avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
     var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg;
     var cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
-    const cv_thresh = 0.1;
+    const cv_thresh = 0.5;
     while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh or sample_count < min_sample_count) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
         const sample = invoke_n(run_iters, args, flush_args);
         sum_cycles += sample;
         sum_sqr += sample * sample;
-        try values.add(sample);
         sample_count += 1;
 
-        if (sample_count > 16 and cv > cv_thresh) {
-            const min = values.peekMin().?;
-            const max = values.peekMax().?;
-            const minf: f64 = @floatFromInt(min);
-            const maxf: f64 = @floatFromInt(max);
-            const biggest = @max(@abs(minf - avg), @abs(maxf - avg));
-            if (biggest > avg / 2) {
-                if (@abs(minf - avg) > @abs(maxf - avg)) {
-                    sum_cycles -= min;
-                    sum_sqr -= min * min;
-                    _ = values.removeMin();
-                } else {
-                    sum_cycles -= max;
-                    sum_sqr -= max * max;
-                    _ = values.removeMax();
-                }
-                sample_count -= 1;
-            }
-        }
 
         avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
         std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg);
@@ -529,11 +497,11 @@ pub fn main() !void {
         const max_buffer_size = max_buffer_size_bytes / @sizeOf(ElemType);
         while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             const value_to_look_for = rng.random().int(u8);
-            const current_stdlib = try measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const naive = try measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const protty = try measureCycles(countScalarProtty, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const multi = try measureCycles(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const streaming = try measureCycles(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const protty = measureCycles(countScalarProtty, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const multi = measureCycles(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const streaming = measureCycles(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
 
             const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], value_to_look_for);
             const protty_cnt = countScalarProtty(ElemType, buf[0..buffer_size], value_to_look_for);
