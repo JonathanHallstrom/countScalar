@@ -430,7 +430,7 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
     var avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
     var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg;
     var cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
-    const cv_thresh = 0.1;
+    const cv_thresh = 0.01;
     while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh or sample_count < min_sample_count) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
         const sample = invoke_n(run_iters, args, flush_args);
         sum_cycles += sample;
@@ -493,18 +493,21 @@ pub fn main() !void {
         // u8 so the counts arent just zero every time
         for (buf) |*e| e.* = rng.random().int(u8);
 
-        const num_values_to_test_correctness = 1024;
         var buffer_size: usize = 1;
 
-        var out_file = try std.fs.cwd().createFile(@typeName(ElemType) ++ ".csv", .{});
-        defer out_file.close();
-        const output = out_file.writer();
-        try output.print("size,current,naive,protty,multi,streaming\n", .{});
-        const values: []ElemType = try allocator.alloc(ElemType, num_values_to_test_correctness);
+        var output_cycles_file = try std.fs.cwd().createFile("cycles_" ++ @typeName(ElemType) ++ ".csv", .{});
+        defer output_cycles_file.close();
+
+        var output_bytes_per_cycle_file = try std.fs.cwd().createFile("bytes_per_cycle_" ++ @typeName(ElemType) ++ ".csv", .{});
+        defer output_bytes_per_cycle_file.close();
+
+        const output_cycles = output_cycles_file.writer();
+        try output_cycles.print("size,current,naive,protty,multi,streaming\n", .{});
+        const output_bytes_per_cycle = output_bytes_per_cycle_file.writer();
+        try output_bytes_per_cycle.print("size,current,naive,protty,multi,streaming\n", .{});
+
         const max_buffer_size = max_buffer_size_bytes / @sizeOf(ElemType);
         while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
-            for (values) |*e| e.* = rng.random().int(u8);
-
             const value_to_look_for = rng.random().int(u8);
             const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
             const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
@@ -512,23 +515,31 @@ pub fn main() !void {
             const multi = measureCycles(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
             const streaming = measureCycles(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
 
-            for (values) |v| {
-                const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], v);
-                const protty_cnt = countScalarProtty(ElemType, buf[0..buffer_size], v);
-                const multi_cnt = countScalarMultiAccum(ElemType, buf[0..buffer_size], v);
-                const streaming_cnt = countScalarStreaming(ElemType, buf[0..buffer_size], v);
-                try std.testing.expectEqual(naive_cnt, protty_cnt);
-                try std.testing.expectEqual(naive_cnt, multi_cnt);
-                try std.testing.expectEqual(naive_cnt, streaming_cnt);
-            }
+            const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], value_to_look_for);
+            const protty_cnt = countScalarProtty(ElemType, buf[0..buffer_size], value_to_look_for);
+            const multi_cnt = countScalarMultiAccum(ElemType, buf[0..buffer_size], value_to_look_for);
+            const streaming_cnt = countScalarStreaming(ElemType, buf[0..buffer_size], value_to_look_for);
+            try std.testing.expectEqual(naive_cnt, protty_cnt);
+            try std.testing.expectEqual(naive_cnt, multi_cnt);
+            try std.testing.expectEqual(naive_cnt, streaming_cnt);
 
-            try output.print("{},{d},{d},{d},{d},{d}\n", .{
+            try output_cycles.print("{},{d},{d},{d},{d},{d}\n", .{
                 buffer_size * @sizeOf(ElemType),
                 current_stdlib,
                 naive,
                 protty,
                 multi,
                 streaming,
+            });
+
+            const buffer_size_float: f64 = @floatFromInt(buffer_size * @sizeOf(ElemType));
+            try output_bytes_per_cycle.print("{},{d},{d},{d},{d},{d}\n", .{
+                buffer_size * @sizeOf(ElemType),
+                buffer_size_float / current_stdlib,
+                buffer_size_float / naive,
+                buffer_size_float / protty,
+                buffer_size_float / multi,
+                buffer_size_float / streaming,
             });
         }
     }

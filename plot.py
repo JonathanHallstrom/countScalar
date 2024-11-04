@@ -21,12 +21,13 @@ def time_fmt(x, pos):
             return "%3.1f %s" % (x, x_unit)
         x /= 1000
 
+
 def cycle_fmt(x, pos):
     return "%3.1f" % x
 
 
-def main(name):
-    file = open(name.split("_")[0] + ".csv", "r")
+def handle_type(element_type, mode):
+    file = open(mode + "_" + element_type + ".csv", "r")
     lines = file.readlines()
 
     data = []
@@ -44,13 +45,9 @@ def main(name):
 
     plt.figure(figsize=(14, 10))
     inf = float("inf")
-    lo, hi = inf, -inf
     for label in labels[1:]:
         dashes = []
         smoothed_data = df_to_plot[label].rolling(50).median()
-        filter_nan = lambda a: a[~np.isnan(a)]
-        lo = min(lo, min(filter_nan(smoothed_data)))
-        hi = max(hi, max(filter_nan(smoothed_data)))
 
         plt.plot(
             df_to_plot["size"],
@@ -76,18 +73,22 @@ def main(name):
     plt.gca().yaxis.set_minor_formatter(tkr.FuncFormatter(lambda *a: ""))
     plt.gca().grid(True, which="both", linestyle="--", linewidth=1)
     plt.xlabel("Size (bytes)")
-    plt.ylabel("Cycles")
+    plt.ylabel("Cycles" if mode == "cycles" else "Bytes per cycle")
 
-    plt.title(f"countScalar ({name})")
+    plt.title(f"countScalar ({element_type})")
 
     plt.legend()
 
-    plt.savefig(name + ".png")
+    plt.savefig(mode + "_" + element_type + ".png")
     plt.show()
     plt.close()
 
 
-main("u8")
-main("u16")
-main("u32")
-main("u64")
+handle_type("u8", "cycles")
+handle_type("u8", "bytes_per_cycle")
+handle_type("u16", "cycles")
+handle_type("u16", "bytes_per_cycle")
+handle_type("u32", "cycles")
+handle_type("u32", "bytes_per_cycle")
+handle_type("u64", "cycles")
+handle_type("u64", "bytes_per_cycle")
