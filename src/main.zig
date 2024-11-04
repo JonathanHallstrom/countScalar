@@ -226,36 +226,42 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
             }
 
             var i: usize = 0;
-            while (haystack[i..].len > vec_size) {
-                @branchHint(.unlikely);
-                const num_accumulators = 4;
+            if (haystack.len > vec_size) {
+                const num_accumulators = 2;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
-                const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
-                var iter: usize = 0;
-
                 const page_size_bytes = std.mem.page_size;
                 const page_size = page_size_bytes / @sizeOf(T);
                 const vecs_per_page = page_size / vec_size;
                 const cache_line_size = std.atomic.cache_line / @sizeOf(T);
+                const streaming_pages = 8;
 
-                while (iter + vecs_per_page * num_accumulators - 1 < iters) : ({
-                    iter += vecs_per_page * num_accumulators;
-                    i += page_size * num_accumulators;
-                }) {
-                    @branchHint(.unlikely);
-                    assert(vecs_per_page % 2 == 0);
-                    inline for (0..vecs_per_page / 2) |half_vec_idx| {
-                        const vec_idx = half_vec_idx * 2;
-                        inline for (0..num_accumulators) |acc_idx| {
-                            @prefetch(haystack[i + vec_idx * vec_size + acc_idx * page_size ..].ptr + 2 * cache_line_size, .{ .locality = 0 });
-                            accs[acc_idx] += V.count(vec_size, haystack[i + vec_idx * vec_size + acc_idx * page_size ..][0..vec_size].*, needle);
-                            accs[acc_idx] += V.count(vec_size, haystack[i + (vec_idx + 1) * vec_size + acc_idx * page_size ..][0..vec_size].*, needle);
+                while (i + streaming_pages * page_size - 1 < haystack.len) : (i += streaming_pages * page_size) {
+                    assert(vecs_per_page % num_accumulators == 0);
+                    inline for (0..vecs_per_page / num_accumulators) |in_page_idx| {
+                        const in_page_offset = in_page_idx * vec_size * num_accumulators;
+                        inline for (0..streaming_pages) |page_idx| {
+                            inline for (0..num_accumulators) |acc_idx| {
+                                accs[acc_idx] += V.count(vec_size, haystack[i + in_page_offset + page_idx * page_size + acc_idx * vec_size ..][0..vec_size].*, needle);
+                            }
+                            @prefetch(haystack[i..].ptr + in_page_offset + page_idx * page_size + num_accumulators * vec_size + 2 * cache_line_size, .{ .locality = 0 });
+                        }
+                        for (&accs) |*acc| {
+                            found += @reduce(.Add, @as(@Vector(vec_size, usize), @intCast(acc.*)));
+                            acc.* = @splat(0);
                         }
                     }
                 }
+            }
+            while (haystack[i..].len > vec_size) {
+                @branchHint(.unlikely);
+                const num_accumulators = 4;
+                var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
+
+                const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
+                var iter: usize = 0;
 
                 while (iter + num_accumulators - 1 < iters) : (iter += num_accumulators) {
-                    inline for (0..num_accumulators) |acc_idx| {
+                    for (0..num_accumulators) |acc_idx| {
                         accs[acc_idx] += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
                         i += vec_size;
                     }
@@ -361,7 +367,7 @@ pub fn sched_setaffinity(pid: std.os.linux.pid_t, set: *const std.os.linux.cpu_s
 
 inline fn flushFromCache(comptime T: type, slice: []const T) void {
     var offs: usize = 0;
-    while (offs < slice.len) : (offs += std.atomic.cache_line / @sizeOf(T)) {
+    while (offs < slice.len) : (offs += 64 / @sizeOf(T)) {
         asm volatile ("clflush %[ptr]"
             :
             : [ptr] "m" (slice[offs..]),
@@ -420,21 +426,19 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
         return @floatFromInt(sum_cycles);
     }
 
-    const min_sample_count = 2;
-    const max_samples = 1 << 14;
+    const max_samples = 1 << 10;
 
     var sample_count: usize = 1;
     var sum_sqr: u64 = sum_cycles * sum_cycles;
     var avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
     var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg;
     var cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
-    const cv_thresh = 0.5;
-    while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh or sample_count < min_sample_count) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
+    const cv_thresh = 0.25;
+    while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
         const sample = invoke_n(run_iters, args, flush_args);
         sum_cycles += sample;
         sum_sqr += sample * sample;
         sample_count += 1;
-
 
         avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
         std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg);
@@ -495,7 +499,7 @@ pub fn main() !void {
         try output_bytes_per_cycle.print("size,current,naive,protty,multi,streaming\n", .{});
 
         const max_buffer_size = max_buffer_size_bytes / @sizeOf(ElemType);
-        while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
+        while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 10 / 9 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             const value_to_look_for = rng.random().int(u8);
             const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
             const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
