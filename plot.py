@@ -47,7 +47,7 @@ def handle_type(element_type, mode):
     inf = float("inf")
     for label in labels[1:]:
         dashes = []
-        smoothed_data = df_to_plot[label].rolling(50).median()
+        smoothed_data = df_to_plot[label].rolling(15).median()
 
         plt.plot(
             df_to_plot["size"],
@@ -59,12 +59,9 @@ def handle_type(element_type, mode):
     plt.gca().set_yscale("log")
 
     plt.gca().set_xscale("log")
-    plt.gca().xaxis.set_major_locator(
-        tkr.LogLocator(base=10.0, subs=range(0, 11, 3), numticks=10)
-    )
     plt.gca().xaxis.set_major_formatter(tkr.FuncFormatter(sizeof_fmt))
     plt.gca().yaxis.set_major_locator(
-        tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=10)
+        tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=2)
     )
     # plt.gca().yaxis.set_minor_locator(
     #     tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=10)
