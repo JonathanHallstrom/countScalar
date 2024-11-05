@@ -401,23 +401,6 @@ inline fn rdtsc() u64 {
     return (@as(u64, a) << 32) | b;
 }
 
-fn computeCV(data: []u64) f64 {
-    const n: f64 = @floatFromInt(data.len);
-    var sum: f64 = 0;
-    for (data) |sample| sum += @floatFromInt(sample);
-    const avg = sum / n;
-    std.debug.print("real avg: {d}\n", .{avg});
-    var variance: f64 = 0;
-    for (data) |sample| {
-        const fsample: f64 = @floatFromInt(sample);
-        variance += (fsample - avg) * (fsample - avg);
-    }
-    variance /= n;
-    const std_dev = @sqrt(variance);
-    std.debug.print("real std: {d}\n", .{std_dev});
-    return (1 + 1 / (4 * n)) * std_dev / avg;
-}
-
 fn computeCorrectedCV(sum: f64, sum_squares: f64, n: f64) f64 {
     const mean = sum / n;
 
