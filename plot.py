@@ -60,14 +60,15 @@ def handle_type(element_type, mode):
 
     plt.gca().set_xscale("log")
     plt.gca().xaxis.set_major_formatter(tkr.FuncFormatter(sizeof_fmt))
-    plt.gca().yaxis.set_major_locator(
-        tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=2)
-    )
     # plt.gca().yaxis.set_minor_locator(
     #     tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=10)
     # )
     plt.gca().yaxis.set_major_formatter(tkr.FuncFormatter(cycle_fmt))
-    plt.gca().yaxis.set_minor_formatter(tkr.FuncFormatter(lambda *a: ""))
+    if mode == "bytes_per_cycle":
+        plt.gca().yaxis.set_major_locator(
+            tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=1)
+        )
+    # plt.gca().yaxis.set_minor_formatter(tkr.FuncFormatter(lambda *a: ""))
     plt.gca().grid(True, which="both", linestyle="--", linewidth=1)
     plt.xlabel("Size (bytes)")
     plt.ylabel("Cycles" if mode == "cycles" else "Bytes per cycle")

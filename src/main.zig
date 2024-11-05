@@ -413,7 +413,7 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
     // 640Ki should be enough for anyone
     const cycle_per_run_thresh = 640 << 10;
     const total_cycle_min_thresh = cycle_per_run_thresh << 2;
-    const total_cycle_max_thresh = cycle_per_run_thresh << 10;
+    const total_cycle_max_thresh = cycle_per_run_thresh << 12;
 
     var sum_cycles: u64 = invoke_n(1, args, flush_args);
     var run_iters: u64 = 1;
@@ -431,9 +431,9 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
     var sample_count: usize = 1;
     var sum_sqr: u64 = sum_cycles * sum_cycles;
     var avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
-    var std_dev = (@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg;
+    var std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles)) + avg * avg) / @as(f64, @floatFromInt(sample_count)));
     var cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
-    const cv_thresh = 0.25;
+    const cv_thresh = 0.1;
     while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
         const sample = invoke_n(run_iters, args, flush_args);
         sum_cycles += sample;
@@ -441,7 +441,7 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
         sample_count += 1;
 
         avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
-        std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles))) / @as(f64, @floatFromInt(sample_count)) + avg * avg);
+        std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles)) + avg * avg) / @as(f64, @floatFromInt(sample_count)));
         cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
     }
 
