@@ -228,16 +228,19 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
             var i: usize = 0;
             if (haystack.len > vec_size) {
                 @branchHint(.unlikely);
-                const num_accumulators = 4;
-                var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
                 const page_size_bytes = std.mem.page_size;
                 const page_size = page_size_bytes / @sizeOf(T);
                 const vecs_per_page = page_size / vec_size;
                 const cache_line_size = std.atomic.cache_line / @sizeOf(T);
                 const streaming_pages = 8;
 
+                const num_accumulators: comptime_int = comptime std.math.ceilPowerOfTwo(u128, @max(1, std.math.divCeil(comptime_int, page_size * streaming_pages, vec_size * std.math.maxInt(Count)) catch unreachable)) catch unreachable;
+                
+                comptime assert(std.math.maxInt(Count) * num_accumulators >= page_size * streaming_pages / vec_size);
+                comptime assert(vecs_per_page % num_accumulators == 0);
+                var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
+
                 while (i + streaming_pages * page_size - 1 < haystack.len) : (i += streaming_pages * page_size) {
-                    comptime assert(vecs_per_page % num_accumulators == 0);
                     for (0..vecs_per_page / num_accumulators) |in_page_idx| {
                         const in_page_offset = in_page_idx * vec_size * num_accumulators;
                         for (0..streaming_pages) |page_idx| {
@@ -248,7 +251,6 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
                         }
                     }
 
-                    comptime assert(std.math.maxInt(Count) * num_accumulators * vec_size >= page_size * streaming_pages);
                     for (&accs) |*acc| {
                         found += @reduce(.Add, @as(@Vector(vec_size, usize), @intCast(acc.*)));
                         acc.* = @splat(0);
