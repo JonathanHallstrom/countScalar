@@ -475,8 +475,8 @@ pub fn main() !void {
     _ = args.next().?;
 
     const max_buffer_size_bytes = try std.fmt.parseInt(usize, args.next() orelse blk: {
-        std.debug.print("Pass a max buffer size as the first argument to customize it, defaulting to 100_000\n", .{});
-        break :blk "100_000";
+        std.debug.print("Pass a max buffer size as the first argument to customize it, defaulting to 1000_000_000\n", .{});
+        break :blk "1000_000_000";
     }, 10);
 
     std.debug.print("build mode: {s}\n", .{@tagName(mode)});
