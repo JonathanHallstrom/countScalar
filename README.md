@@ -4,5 +4,5 @@
 
 `zig build run -Doptimize=ReleaseFast -- 12345` to run with a maximum buffer size of 12345 bytes
 
-
+running to 1_000_000_000 takes a few minutes
 cant seem to get the streaming implementation to be any faster :(
