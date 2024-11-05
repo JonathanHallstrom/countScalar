@@ -227,7 +227,8 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
 
             var i: usize = 0;
             if (haystack.len > vec_size) {
-                const num_accumulators = 2;
+                @branchHint(.unlikely);
+                const num_accumulators = 4;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
                 const page_size_bytes = std.mem.page_size;
                 const page_size = page_size_bytes / @sizeOf(T);
@@ -236,19 +237,21 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
                 const streaming_pages = 8;
 
                 while (i + streaming_pages * page_size - 1 < haystack.len) : (i += streaming_pages * page_size) {
-                    assert(vecs_per_page % num_accumulators == 0);
-                    inline for (0..vecs_per_page / num_accumulators) |in_page_idx| {
+                    comptime assert(vecs_per_page % num_accumulators == 0);
+                    for (0..vecs_per_page / num_accumulators) |in_page_idx| {
                         const in_page_offset = in_page_idx * vec_size * num_accumulators;
-                        inline for (0..streaming_pages) |page_idx| {
-                            inline for (0..num_accumulators) |acc_idx| {
+                        for (0..streaming_pages) |page_idx| {
+                            for (0..num_accumulators) |acc_idx| {
                                 accs[acc_idx] += V.count(vec_size, haystack[i + in_page_offset + page_idx * page_size + acc_idx * vec_size ..][0..vec_size].*, needle);
                             }
-                            @prefetch(haystack[i..].ptr + in_page_offset + page_idx * page_size + num_accumulators * vec_size + 2 * cache_line_size, .{ .locality = 0 });
+                            @prefetch(haystack[i..].ptr + in_page_offset + page_idx * page_size + num_accumulators * vec_size + 4 * cache_line_size, .{ .locality = 0 });
                         }
-                        for (&accs) |*acc| {
-                            found += @reduce(.Add, @as(@Vector(vec_size, usize), @intCast(acc.*)));
-                            acc.* = @splat(0);
-                        }
+                    }
+
+                    comptime assert(std.math.maxInt(Count) * num_accumulators * vec_size >= page_size * streaming_pages);
+                    for (&accs) |*acc| {
+                        found += @reduce(.Add, @as(@Vector(vec_size, usize), @intCast(acc.*)));
+                        acc.* = @splat(0);
                     }
                 }
             }
@@ -396,10 +399,39 @@ inline fn rdtsc() u64 {
     return (@as(u64, a) << 32) | b;
 }
 
-fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: anytype, flush_args: anytype) f64 {
+fn computeCV(data: []u64) f64 {
+    const n: f64 = @floatFromInt(data.len);
+    var sum: f64 = 0;
+    for (data) |sample| sum += @floatFromInt(sample);
+    const avg = sum / n;
+    std.debug.print("real avg: {d}\n", .{avg});
+    var variance: f64 = 0;
+    for (data) |sample| {
+        const fsample: f64 = @floatFromInt(sample);
+        variance += (fsample - avg) * (fsample - avg);
+    }
+    variance /= n;
+    const std_dev = @sqrt(variance);
+    std.debug.print("real std: {d}\n", .{std_dev});
+    return (1 + 1 / (4 * n)) * std_dev / avg;
+}
+
+fn computeCorrectedCV(sum: f64, sum_squares: f64, n: f64) f64 {
+    const mean = sum / n;
+
+    if (mean == 0) {
+        return 1e9;
+    }
+
+    const variance = (sum_squares / n) - (mean * mean);
+    const std_dev = @sqrt(variance);
+
+    return (1 + 1 / (4 * n)) * std_dev / mean;
+}
+
+fn measureCycles(comptime func: anytype, args: anytype) f64 {
     const invoke_n = struct {
-        fn impl(n: usize, args_: anytype, flush_args_: anytype) usize {
-            _ = @call(.auto, flush_func, flush_args_);
+        fn impl(n: usize, args_: anytype) usize {
             const start = rdtsc();
             for (0..n) |_| {
                 std.mem.doNotOptimizeAway(@call(.never_inline, func, args_));
@@ -409,43 +441,36 @@ fn measureCycles(comptime func: anytype, args: anytype, comptime flush_func: any
         }
     }.impl;
 
-    // minimum number of cycles we want each invocation to take
-    // 640Ki should be enough for anyone
-    const cycle_per_run_thresh = 640 << 10;
-    const total_cycle_min_thresh = cycle_per_run_thresh << 2;
-    const total_cycle_max_thresh = cycle_per_run_thresh << 12;
+    const cycle_per_run_thresh = 160 << 10;
+    const total_cycle_min_thresh = cycle_per_run_thresh << 4;
+    const total_cycle_max_thresh = cycle_per_run_thresh << 10;
 
-    var sum_cycles: u64 = invoke_n(1, args, flush_args);
-    var run_iters: u64 = 1;
+    var sum_cycles: u64 = invoke_n(1, args);
+    var calls_per_iter: u64 = 1;
     while (sum_cycles < cycle_per_run_thresh) {
-        run_iters *= 2;
-        sum_cycles = invoke_n(run_iters, args, flush_args);
+        calls_per_iter *= 2;
+        sum_cycles = invoke_n(calls_per_iter, args);
     }
+
     // one invocation is enough
     if (sum_cycles >= total_cycle_max_thresh) {
-        return @floatFromInt(sum_cycles);
+        return @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(calls_per_iter));
     }
-
-    const max_samples = 1 << 10;
 
     var sample_count: usize = 1;
     var sum_sqr: u64 = sum_cycles * sum_cycles;
-    var avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
-    var std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles)) + avg * avg) / @as(f64, @floatFromInt(sample_count)));
-    var cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
-    const cv_thresh = 0.1;
-    while ((cv > cv_thresh or sum_cycles < total_cycle_min_thresh) and sample_count < max_samples and sum_cycles < total_cycle_max_thresh) {
-        const sample = invoke_n(run_iters, args, flush_args);
+    const cv_thresh = 0.5;
+
+    // warmup
+    while ((computeCorrectedCV(@floatFromInt(sum_cycles), @floatFromInt(sum_sqr), @floatFromInt(sample_count)) > cv_thresh or sum_cycles < total_cycle_min_thresh) and sum_cycles < total_cycle_max_thresh) {
+        const sample = invoke_n(calls_per_iter, args);
         sum_cycles += sample;
         sum_sqr += sample * sample;
         sample_count += 1;
-
-        avg = @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(sample_count));
-        std_dev = @sqrt((@as(f64, @floatFromInt(sum_sqr)) - 2 * avg * @as(f64, @floatFromInt(sum_cycles)) + avg * avg) / @as(f64, @floatFromInt(sample_count)));
-        cv = (1 + 1 / @as(f64, @floatFromInt(4 * sample_count))) * std_dev / avg;
     }
 
-    return avg / @as(f64, @floatFromInt(run_iters));
+    // std.debug.print("{d}\n", .{computeCorrectedCV(@floatFromInt(sum_cycles), @floatFromInt(sum_sqr), @floatFromInt(sample_count))});
+    return @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(calls_per_iter * sample_count));
 }
 
 pub fn main() !void {
@@ -499,13 +524,18 @@ pub fn main() !void {
         try output_bytes_per_cycle.print("size,current,naive,protty,multi,streaming\n", .{});
 
         const max_buffer_size = max_buffer_size_bytes / @sizeOf(ElemType);
-        while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 10 / 9 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
+        while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             const value_to_look_for = rng.random().int(u8);
-            const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const protty = measureCycles(countScalarProtty, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const multi = measureCycles(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
-            const streaming = measureCycles(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for }, flushFromCache, .{ ElemType, buf[0..buffer_size] });
+            const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} });
+            // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "std" });
+            const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "naive" });
+            const protty = measureCycles(countScalarProtty, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "protty" });
+            const multi = measureCycles(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "multi" });
+            const streaming = measureCycles(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "streaming" });
 
             const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], value_to_look_for);
             const protty_cnt = countScalarProtty(ElemType, buf[0..buffer_size], value_to_look_for);

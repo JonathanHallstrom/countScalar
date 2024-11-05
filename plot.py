@@ -47,7 +47,7 @@ def handle_type(element_type, mode):
     inf = float("inf")
     for label in labels[1:]:
         dashes = []
-        smoothed_data = df_to_plot[label].rolling(10).median()
+        smoothed_data = df_to_plot[label].rolling(25).median()
 
         plt.plot(
             df_to_plot["size"],
