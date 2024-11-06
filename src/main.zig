@@ -27,7 +27,6 @@ pub fn countScalarProtty(comptime T: type, haystack: []const T, needle: T) usize
 
     if (haystack.len == 0) return found;
     if (haystack.len < 4) {
-        @branchHint(.unlikely);
         found += (haystack.len >> 1) & (haystack.len & 1) & @intFromBool(haystack[haystack.len - 1] == needle);
         found += (haystack.len >> 1) & @intFromBool(haystack[haystack.len >> 1] == needle);
         found += @intFromBool(haystack[0] == needle);
@@ -37,7 +36,7 @@ pub fn countScalarProtty(comptime T: type, haystack: []const T, needle: T) usize
     if (backend_supports_vectors and
         !std.debug.inValgrind() and // https://github.com/ziglang/zig/issues/17717
         !@inComptime() and
-        (@typeInfo(T) == .int or @typeInfo(T) == .float) and
+        (@typeInfo(T) == .Int or @typeInfo(T) == .Float) and
         std.math.isPowerOfTwo(@bitSizeOf(T)) and
         std.meta.hasUniqueRepresentation(T))
     {
@@ -61,7 +60,6 @@ pub fn countScalarProtty(comptime T: type, haystack: []const T, needle: T) usize
             inline for (2..@max(2, @ctz(@as(usize, vec_size)))) |n| {
                 const min_vec: comptime_int = 2 << n;
                 if (haystack.len <= min_vec) {
-                    @branchHint(.unlikely);
                     const vec: @Vector(min_vec, T) = @bitCast([_][min_vec / 2]T{
                         haystack[haystack.len - (min_vec / 2) ..][0 .. min_vec / 2].*,
                         haystack[0 .. min_vec / 2].*,
@@ -72,7 +70,7 @@ pub fn countScalarProtty(comptime T: type, haystack: []const T, needle: T) usize
 
             var i: usize = 0;
             while (haystack[i..].len > vec_size) {
-                @branchHint(.likely);
+                
                 var acc: @Vector(vec_size, Count) = @splat(0);
                 for (0..@min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize))) |_| {
                     acc += V.count(vec_size, haystack[i..][0..vec_size].*, needle);
@@ -98,7 +96,6 @@ pub fn countScalarMultiAccum(comptime T: type, haystack: []const T, needle: T) u
 
     if (haystack.len == 0) return found;
     if (haystack.len < 4) {
-        @branchHint(.unlikely);
         found += (haystack.len >> 1) & (haystack.len & 1) & @intFromBool(haystack[haystack.len - 1] == needle);
         found += (haystack.len >> 1) & @intFromBool(haystack[haystack.len >> 1] == needle);
         found += @intFromBool(haystack[0] == needle);
@@ -108,7 +105,7 @@ pub fn countScalarMultiAccum(comptime T: type, haystack: []const T, needle: T) u
     if (backend_supports_vectors and
         !std.debug.inValgrind() and // https://github.com/ziglang/zig/issues/17717
         !@inComptime() and
-        (@typeInfo(T) == .int or @typeInfo(T) == .float) and
+        (@typeInfo(T) == .Int or @typeInfo(T) == .Float) and
         std.math.isPowerOfTwo(@bitSizeOf(T)) and
         std.meta.hasUniqueRepresentation(T))
     {
@@ -132,7 +129,6 @@ pub fn countScalarMultiAccum(comptime T: type, haystack: []const T, needle: T) u
             inline for (2..@max(2, @ctz(@as(usize, vec_size)))) |n| {
                 const min_vec = 2 << n;
                 if (haystack.len <= min_vec) {
-                    @branchHint(.unlikely);
                     const vec: @Vector(min_vec, T) = @bitCast([_][min_vec / 2]T{
                         haystack[haystack.len - (min_vec / 2) ..][0 .. min_vec / 2].*,
                         haystack[0 .. min_vec / 2].*,
@@ -143,7 +139,6 @@ pub fn countScalarMultiAccum(comptime T: type, haystack: []const T, needle: T) u
 
             var i: usize = 0;
             while (haystack[i..].len > vec_size) {
-                @branchHint(.unlikely);
                 const num_accumulators = 4;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
                 const iters = @min((haystack[i..].len - 1) / vec_size, std.math.maxInt(Count), std.math.maxInt(usize));
@@ -182,7 +177,6 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
 
     if (haystack.len == 0) return found;
     if (haystack.len < 4) {
-        @branchHint(.unlikely);
         found += (haystack.len >> 1) & (haystack.len & 1) & @intFromBool(haystack[haystack.len - 1] == needle);
         found += (haystack.len >> 1) & @intFromBool(haystack[haystack.len >> 1] == needle);
         found += @intFromBool(haystack[0] == needle);
@@ -192,7 +186,7 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
     if (backend_supports_vectors and
         !std.debug.inValgrind() and // https://github.com/ziglang/zig/issues/17717
         !@inComptime() and
-        (@typeInfo(T) == .int or @typeInfo(T) == .float) and
+        (@typeInfo(T) == .Int or @typeInfo(T) == .Float) and
         std.math.isPowerOfTwo(@bitSizeOf(T)) and
         std.meta.hasUniqueRepresentation(T))
     {
@@ -216,7 +210,6 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
             inline for (2..@max(2, @ctz(@as(usize, vec_size)))) |n| {
                 const min_vec = 2 << n;
                 if (haystack.len <= min_vec) {
-                    @branchHint(.unlikely);
                     const vec: @Vector(min_vec, T) = @bitCast([_][min_vec / 2]T{
                         haystack[haystack.len - (min_vec / 2) ..][0 .. min_vec / 2].*,
                         haystack[0 .. min_vec / 2].*,
@@ -227,7 +220,6 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
 
             var i: usize = 0;
             if (haystack.len > vec_size) {
-                @branchHint(.unlikely);
                 const page_size_bytes = std.mem.page_size;
                 const page_size = page_size_bytes / @sizeOf(T);
                 const vecs_per_page = page_size / vec_size;
@@ -258,7 +250,6 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
                 }
             }
             while (haystack[i..].len > vec_size) {
-                @branchHint(.unlikely);
                 const num_accumulators = 4;
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
 
@@ -299,7 +290,6 @@ pub fn countScalarSwar(comptime T: type, haystack: []const T, needle: T) usize {
 
     if (haystack.len == 0) return found;
     if (haystack.len < 4) {
-        @branchHint(.unlikely);
         found += (haystack.len >> 1) & (haystack.len & 1) & @intFromBool(haystack[haystack.len - 1] == needle);
         found += (haystack.len >> 1) & @intFromBool(haystack[haystack.len >> 1] == needle);
         found += @intFromBool(haystack[0] == needle);
@@ -307,7 +297,7 @@ pub fn countScalarSwar(comptime T: type, haystack: []const T, needle: T) usize {
     }
 
     var i: usize = 0;
-    if (@typeInfo(T) == .int and
+    if (@typeInfo(T) == .Int and
         std.math.isPowerOfTwo(@bitSizeOf(T)) and
         std.meta.hasUniqueRepresentation(T) and
         @sizeOf(T) < @sizeOf(usize))
