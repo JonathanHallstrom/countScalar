@@ -389,18 +389,6 @@ inline fn flushFromCache(comptime T: type, slice: []const T) void {
     // }
 }
 
-inline fn rdtsc() u64 {
-    var a: u32 = undefined;
-    var b: u32 = undefined;
-    asm volatile ("rdtscp"
-        : [a] "={edx}" (a),
-          [b] "={eax}" (b),
-        :
-        : "ecx"
-    );
-    return (@as(u64, a) << 32) | b;
-}
-
 fn computeCorrectedCV(sum: f64, sum_squares: f64, n: f64) f64 {
     const mean = sum / n;
 
@@ -414,48 +402,47 @@ fn computeCorrectedCV(sum: f64, sum_squares: f64, n: f64) f64 {
     return (1 + 1 / (4 * n)) * std_dev / mean;
 }
 
-fn measureCycles(comptime func: anytype, args: anytype) f64 {
+fn measureNanos(comptime func: anytype, args: anytype) f64 {
     const invoke_n = struct {
-        fn impl(n: usize, args_: anytype) usize {
-            const start = rdtsc();
+        fn impl(n: usize, args_: anytype) u64 {
+            const start = std.time.Instant.now() catch unreachable;
             for (0..n) |_| {
                 std.mem.doNotOptimizeAway(@call(.never_inline, func, args_));
             }
-            const end = rdtsc();
-            return end - start;
+            const end = std.time.Instant.now() catch unreachable;
+            return end.since(start);
         }
     }.impl;
 
-    const cycle_per_run_thresh = 160 << 10;
-    const total_cycle_min_thresh = cycle_per_run_thresh << 4;
-    const total_cycle_max_thresh = cycle_per_run_thresh << 10;
+    const nanos_per_run_thresh = 40 << 10;
+    const total_nano_min_thresh = nanos_per_run_thresh << 4;
+    const total_nano_max_thresh = nanos_per_run_thresh << 10;
 
-    var sum_cycles: u64 = invoke_n(1, args);
+    var sum_nanos: u64 = invoke_n(1, args);
     var calls_per_iter: u64 = 1;
-    while (sum_cycles < cycle_per_run_thresh) {
+    while (sum_nanos < nanos_per_run_thresh) {
         calls_per_iter *= 2;
-        sum_cycles = invoke_n(calls_per_iter, args);
+        sum_nanos = invoke_n(calls_per_iter, args);
     }
 
     // one invocation is enough
-    if (sum_cycles >= total_cycle_max_thresh) {
-        return @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(calls_per_iter));
+    if (sum_nanos >= total_nano_max_thresh) {
+        return @as(f64, @floatFromInt(sum_nanos)) / @as(f64, @floatFromInt(calls_per_iter));
     }
 
     var sample_count: usize = 1;
-    var sum_sqr: u64 = sum_cycles * sum_cycles;
+    var sum_sqr: u64 = sum_nanos * sum_nanos;
     const cv_thresh = 0.5;
 
     // warmup
-    while ((computeCorrectedCV(@floatFromInt(sum_cycles), @floatFromInt(sum_sqr), @floatFromInt(sample_count)) > cv_thresh or sum_cycles < total_cycle_min_thresh) and sum_cycles < total_cycle_max_thresh) {
+    while ((computeCorrectedCV(@floatFromInt(sum_nanos), @floatFromInt(sum_sqr), @floatFromInt(sample_count)) > cv_thresh or sum_nanos < total_nano_min_thresh) and sum_nanos < total_nano_max_thresh) {
         const sample = invoke_n(calls_per_iter, args);
-        sum_cycles += sample;
+        sum_nanos += sample;
         sum_sqr += sample * sample;
         sample_count += 1;
     }
 
-    // std.debug.print("{d}\n", .{computeCorrectedCV(@floatFromInt(sum_cycles), @floatFromInt(sum_sqr), @floatFromInt(sample_count))});
-    return @as(f64, @floatFromInt(sum_cycles)) / @as(f64, @floatFromInt(calls_per_iter * sample_count));
+    return @as(f64, @floatFromInt(sum_nanos)) / @as(f64, @floatFromInt(calls_per_iter * sample_count));
 }
 
 pub fn main() !void {
@@ -497,29 +484,29 @@ pub fn main() !void {
 
         var buffer_size: usize = 1;
 
-        var output_cycles_file = try std.fs.cwd().createFile("cycles_" ++ @typeName(ElemType) ++ ".csv", .{});
-        defer output_cycles_file.close();
+        var output_nanos_file = try std.fs.cwd().createFile("nanoseconds_" ++ @typeName(ElemType) ++ ".csv", .{});
+        defer output_nanos_file.close();
 
-        var output_bytes_per_cycle_file = try std.fs.cwd().createFile("bytes_per_cycle_" ++ @typeName(ElemType) ++ ".csv", .{});
-        defer output_bytes_per_cycle_file.close();
+        var output_bytes_per_nano_file = try std.fs.cwd().createFile("bytes_per_nanosecond_" ++ @typeName(ElemType) ++ ".csv", .{});
+        defer output_bytes_per_nano_file.close();
 
-        const output_cycles = output_cycles_file.writer();
-        try output_cycles.print("size,current,naive,protty,multi,streaming\n", .{});
-        const output_bytes_per_cycle = output_bytes_per_cycle_file.writer();
-        try output_bytes_per_cycle.print("size,current,naive,protty,multi,streaming\n", .{});
+        const output_nanos = output_nanos_file.writer();
+        try output_nanos.print("size,current,naive,protty,multi,streaming\n", .{});
+        const output_bytes_per_nano = output_bytes_per_nano_file.writer();
+        try output_bytes_per_nano.print("size,current,naive,protty,multi,streaming\n", .{});
 
         const max_buffer_size = max_buffer_size_bytes / @sizeOf(ElemType);
         while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
             const value_to_look_for = rng.random().int(u8);
-            const current_stdlib = measureCycles(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} });
+            const current_stdlib = measureNanos(std.mem.count, .{ ElemType, buf[0..buffer_size], &.{value_to_look_for} });
             // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "std" });
-            const naive = measureCycles(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            const naive = measureNanos(countScalarNaive, .{ ElemType, buf[0..buffer_size], value_to_look_for });
             // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "naive" });
-            const protty = measureCycles(countScalarProtty, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            const protty = measureNanos(countScalarProtty, .{ ElemType, buf[0..buffer_size], value_to_look_for });
             // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "protty" });
-            const multi = measureCycles(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            const multi = measureNanos(countScalarMultiAccum, .{ ElemType, buf[0..buffer_size], value_to_look_for });
             // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "multi" });
-            const streaming = measureCycles(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            const streaming = measureNanos(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for });
             // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "streaming" });
 
             const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], value_to_look_for);
@@ -530,7 +517,7 @@ pub fn main() !void {
             try std.testing.expectEqual(naive_cnt, multi_cnt);
             try std.testing.expectEqual(naive_cnt, streaming_cnt);
 
-            try output_cycles.print("{},{d},{d},{d},{d},{d}\n", .{
+            try output_nanos.print("{},{d},{d},{d},{d},{d}\n", .{
                 buffer_size * @sizeOf(ElemType),
                 current_stdlib,
                 naive,
@@ -540,7 +527,7 @@ pub fn main() !void {
             });
 
             const buffer_size_float: f64 = @floatFromInt(buffer_size * @sizeOf(ElemType));
-            try output_bytes_per_cycle.print("{},{d},{d},{d},{d},{d}\n", .{
+            try output_bytes_per_nano.print("{},{d},{d},{d},{d},{d}\n", .{
                 buffer_size * @sizeOf(ElemType),
                 buffer_size_float / current_stdlib,
                 buffer_size_float / naive,

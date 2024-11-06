@@ -22,7 +22,7 @@ def time_fmt(x, pos):
         x /= 1000
 
 
-def cycle_fmt(x, pos):
+def nanosecond_fmt(x, pos):
     return "%3.1f" % x
 
 
@@ -63,15 +63,15 @@ def handle_type(element_type, mode):
     # plt.gca().yaxis.set_minor_locator(
     #     tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=10)
     # )
-    plt.gca().yaxis.set_major_formatter(tkr.FuncFormatter(cycle_fmt))
-    if mode == "bytes_per_cycle":
+    plt.gca().yaxis.set_major_formatter(tkr.FuncFormatter(nanosecond_fmt))
+    if mode == "bytes_per_nanosecond":
         plt.gca().yaxis.set_major_locator(
             tkr.LogLocator(base=10.0, subs=range(0, 10, 1), numticks=1)
         )
     # plt.gca().yaxis.set_minor_formatter(tkr.FuncFormatter(lambda *a: ""))
     plt.gca().grid(True, which="both", linestyle="--", linewidth=1)
     plt.xlabel("Size (bytes)")
-    plt.ylabel("Cycles" if mode == "cycles" else "Bytes per cycle")
+    plt.ylabel("ns" if mode == "nanoseconds" else "GB/s")
 
     plt.title(f"countScalar ({element_type})")
 
@@ -82,11 +82,11 @@ def handle_type(element_type, mode):
     plt.close()
 
 
-handle_type("u8", "cycles")
-handle_type("u8", "bytes_per_cycle")
-handle_type("u16", "cycles")
-handle_type("u16", "bytes_per_cycle")
-handle_type("u32", "cycles")
-handle_type("u32", "bytes_per_cycle")
-handle_type("u64", "cycles")
-handle_type("u64", "bytes_per_cycle")
+handle_type("u8", "nanoseconds")
+handle_type("u8", "bytes_per_nanosecond")
+handle_type("u16", "nanoseconds")
+handle_type("u16", "bytes_per_nanosecond")
+handle_type("u32", "nanoseconds")
+handle_type("u32", "bytes_per_nanosecond")
+handle_type("u64", "nanoseconds")
+handle_type("u64", "bytes_per_nanosecond")
