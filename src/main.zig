@@ -370,25 +370,6 @@ pub fn sched_setaffinity(pid: std.os.linux.pid_t, set: *const std.os.linux.cpu_s
     }
 }
 
-inline fn flushFromCache(comptime T: type, slice: []const T) void {
-    var offs: usize = 0;
-    while (offs < slice.len) : (offs += 64 / @sizeOf(T)) {
-        asm volatile ("clflush %[ptr]"
-            :
-            : [ptr] "m" (slice[offs..]),
-            : "memory"
-        );
-    }
-    // for (0..slice.len / @sizeOf(T)) |chunk| {
-    //     const offset = slice.ptr + (chunk * @sizeOf(T));
-    //     asm volatile ("clflush %[ptr]"
-    //         :
-    //         : [ptr] "m" (offset),
-    //         : "memory"
-    //     );
-    // }
-}
-
 fn computeCorrectedCV(sum: f64, sum_squares: f64, n: f64) f64 {
     const mean = sum / n;
 
