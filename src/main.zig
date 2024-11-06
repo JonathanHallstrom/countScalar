@@ -235,7 +235,7 @@ pub fn countScalarStreaming(comptime T: type, haystack: []const T, needle: T) us
                 const streaming_pages = 8;
 
                 const num_accumulators: comptime_int = comptime std.math.ceilPowerOfTwo(u128, @max(1, std.math.divCeil(comptime_int, page_size * streaming_pages, vec_size * std.math.maxInt(Count)) catch unreachable)) catch unreachable;
-                
+
                 comptime assert(std.math.maxInt(Count) * num_accumulators >= page_size * streaming_pages / vec_size);
                 comptime assert(vecs_per_page % num_accumulators == 0);
                 var accs: [num_accumulators]@Vector(vec_size, Count) = .{@as(@Vector(vec_size, Count), @splat(0))} ** num_accumulators;
@@ -294,6 +294,67 @@ test countScalarStreaming {
     try testCountScalar(countScalarStreaming);
 }
 
+pub fn countScalarSwar(comptime T: type, haystack: []const T, needle: T) usize {
+    var found: usize = 0;
+
+    if (haystack.len == 0) return found;
+    if (haystack.len < 4) {
+        @branchHint(.unlikely);
+        found += (haystack.len >> 1) & (haystack.len & 1) & @intFromBool(haystack[haystack.len - 1] == needle);
+        found += (haystack.len >> 1) & @intFromBool(haystack[haystack.len >> 1] == needle);
+        found += @intFromBool(haystack[0] == needle);
+        return found;
+    }
+
+    var i: usize = 0;
+    if (@typeInfo(T) == .int and
+        std.math.isPowerOfTwo(@bitSizeOf(T)) and
+        std.meta.hasUniqueRepresentation(T) and
+        @sizeOf(T) < @sizeOf(usize))
+    {
+        const reg_size = @sizeOf(usize);
+        const elem_bytes = @sizeOf(T);
+        const register_block_len = reg_size / elem_bytes;
+        const lowest_bits: usize = std.math.maxInt(usize) / ((1 << @bitSizeOf(T)) - 1) * 0x01;
+        const highest_bits = lowest_bits * (1 << @bitSizeOf(T) - 1);
+        const needles = lowest_bits * needle;
+
+        const native_endian = builtin.cpu.arch.endian();
+
+        const unroll = 8;
+        // unroll because popcnt is expensive
+        while (i + register_block_len * unroll - 1 < haystack.len) : (i += unroll * register_block_len) {
+            var is_needle: usize = 0;
+            inline for (0..unroll) |offset| {
+                const vals = std.mem.readInt(usize, @ptrCast(haystack[i + offset * register_block_len ..][0..register_block_len]), native_endian);
+                const check = vals ^ needles;
+                const equal_lane = check | (check | highest_bits) - lowest_bits;
+                const res = ~equal_lane & highest_bits;
+
+                is_needle |= res >> offset;
+            }
+            found += @popCount(is_needle);
+        }
+
+        while (i + register_block_len - 1 < haystack.len) : (i += register_block_len) {
+            const vals = std.mem.readInt(usize, @ptrCast(haystack[i..][0..register_block_len]), native_endian);
+            const check = vals ^ needles;
+            const equal_lane = check | (check | highest_bits) - lowest_bits;
+            const res = ~equal_lane & highest_bits;
+            found += @popCount(res);
+        }
+    }
+
+    for (haystack[i..]) |elem| {
+        found += @intFromBool(elem == needle);
+    }
+    return found;
+}
+
+test countScalarSwar {
+    try testCountScalar(countScalarSwar);
+}
+
 fn testCountScalar(countScalar: anytype) !void {
     try testing.expectEqual(0, countScalar(u8, &.{0}, 1));
     try testing.expectEqual(1, countScalar(u8, &.{1}, 1));
@@ -333,7 +394,7 @@ fn fuzzOne(bytes: []const u8) !void {
             const needle = array[0];
             const haystack = array[1..];
 
-            inline for (.{ "protty", "multi", "streaming" }, .{ countScalarProtty, countScalarMultiAccum, countScalarStreaming }) |name, countScalar| {
+            inline for (.{ "protty", "multi", "streaming", "swar" }, .{ countScalarProtty, countScalarMultiAccum, countScalarStreaming, countScalarSwar }) |name, countScalar| {
                 testing.expectEqual(
                     countScalarNaive(T, haystack, needle),
                     countScalar(T, haystack, needle),
@@ -395,12 +456,12 @@ fn measureNanos(comptime func: anytype, args: anytype) f64 {
         }
     }.impl;
 
-    const nanos_per_run_thresh = 40 << 10;
-    const total_nano_min_thresh = nanos_per_run_thresh << 4;
-    const total_nano_max_thresh = nanos_per_run_thresh << 10;
+    const nanos_per_run_thresh: usize = 160 << 10;
+    const total_nano_min_thresh: usize = nanos_per_run_thresh << 4;
+    const total_nano_max_thresh: usize = nanos_per_run_thresh << 10;
 
     var sum_nanos: u64 = invoke_n(1, args);
-    var calls_per_iter: u64 = 1;
+    var calls_per_iter: usize = 1;
     while (sum_nanos < nanos_per_run_thresh) {
         calls_per_iter *= 2;
         sum_nanos = invoke_n(calls_per_iter, args);
@@ -428,7 +489,7 @@ fn measureNanos(comptime func: anytype, args: anytype) f64 {
 
 pub fn main() !void {
     if (builtin.os.tag == .linux) {
-        const cpu0001: std.os.linux.cpu_set_t = [1]usize{0b0001} ++ ([_]usize{0} ** (16 - 1));
+        const cpu0001: std.os.linux.cpu_set_t = [1]usize{0b0001} ++ ([_]usize{0} ** (std.os.linux.CPU_SETSIZE / @sizeOf(usize) - 1));
         try sched_setaffinity(0, &cpu0001);
     }
     const mode = builtin.mode;
@@ -472,9 +533,9 @@ pub fn main() !void {
         defer output_bytes_per_nano_file.close();
 
         const output_nanos = output_nanos_file.writer();
-        try output_nanos.print("size,current,naive,protty,multi,streaming\n", .{});
+        try output_nanos.print("size,current,naive,protty,multi,streaming,swar\n", .{});
         const output_bytes_per_nano = output_bytes_per_nano_file.writer();
-        try output_bytes_per_nano.print("size,current,naive,protty,multi,streaming\n", .{});
+        try output_bytes_per_nano.print("size,current,naive,protty,multi,streaming,swar\n", .{});
 
         const max_buffer_size = max_buffer_size_bytes / @sizeOf(ElemType);
         while (buffer_size <= max_buffer_size) : (buffer_size = @min(buffer_size * 100 / 99 + 1, max_buffer_size) + @intFromBool(buffer_size == max_buffer_size)) {
@@ -489,32 +550,38 @@ pub fn main() !void {
             // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "multi" });
             const streaming = measureNanos(countScalarStreaming, .{ ElemType, buf[0..buffer_size], value_to_look_for });
             // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "streaming" });
+            const swar = measureNanos(countScalarSwar, .{ ElemType, buf[0..buffer_size], value_to_look_for });
+            // std.debug.print("{} {s} {s}\n", .{ buffer_size, @typeName(ElemType), "streaming" });
 
             const naive_cnt = countScalarNaive(ElemType, buf[0..buffer_size], value_to_look_for);
             const protty_cnt = countScalarProtty(ElemType, buf[0..buffer_size], value_to_look_for);
             const multi_cnt = countScalarMultiAccum(ElemType, buf[0..buffer_size], value_to_look_for);
             const streaming_cnt = countScalarStreaming(ElemType, buf[0..buffer_size], value_to_look_for);
+            const swar_cnt = countScalarSwar(ElemType, buf[0..buffer_size], value_to_look_for);
             try std.testing.expectEqual(naive_cnt, protty_cnt);
             try std.testing.expectEqual(naive_cnt, multi_cnt);
             try std.testing.expectEqual(naive_cnt, streaming_cnt);
+            try std.testing.expectEqual(naive_cnt, swar_cnt);
 
-            try output_nanos.print("{},{d},{d},{d},{d},{d}\n", .{
+            try output_nanos.print("{},{d},{d},{d},{d},{d},{d}\n", .{
                 buffer_size * @sizeOf(ElemType),
                 current_stdlib,
                 naive,
                 protty,
                 multi,
                 streaming,
+                swar,
             });
 
             const buffer_size_float: f64 = @floatFromInt(buffer_size * @sizeOf(ElemType));
-            try output_bytes_per_nano.print("{},{d},{d},{d},{d},{d}\n", .{
+            try output_bytes_per_nano.print("{},{d},{d},{d},{d},{d},{d}\n", .{
                 buffer_size * @sizeOf(ElemType),
                 buffer_size_float / current_stdlib,
                 buffer_size_float / naive,
                 buffer_size_float / protty,
                 buffer_size_float / multi,
                 buffer_size_float / streaming,
+                buffer_size_float / swar,
             });
         }
     }
